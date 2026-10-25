@@ -24,6 +24,7 @@ CONFIG_PATH = os.path.join(
     "shiftly",
     "config.json",
 )
+SLOGAN = "What's the best position to work? The next one."
 SOUND_FILE = "/usr/share/sounds/freedesktop/stereo/complete.oga"
 DEFAULT_CONFIG = {
     "phases": [
@@ -224,7 +225,7 @@ class Shiftly(Gtk.Application):
         icon_name = (
             "media-playback-pause-symbolic"
             if c.paused
-            else "preferences-system-time-symbolic"
+            else "shiftly-symbolic"
         )
         if XApp is not None:
             self.icon.set_icon_name(icon_name)
@@ -259,7 +260,7 @@ class SettingsWindow(Gtk.Window):
     def __init__(self, app):
         super().__init__(title="Shiftly settings", default_width=420, default_height=360)
         self.app = app
-        self.set_icon_name("preferences-system-time")
+        self.set_icon_name("shiftly")
 
         self.store = Gtk.ListStore(str, str)  # name, minutes (as text)
         for p in app.cycle.cfg["phases"]:
@@ -302,8 +303,22 @@ class SettingsWindow(Gtk.Window):
         self.hint = Gtk.Label(
             label="Phases run top to bottom, then repeat.", xalign=0
         )
+        self.hint.get_style_context().add_class("dim-label")
+        logo = Gtk.Image.new_from_icon_name("shiftly", Gtk.IconSize.DIALOG)
+        logo.set_pixel_size(56)
+        title = Gtk.Label(xalign=0)
+        title.set_markup("<big><b>Shiftly</b></big>")
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        slogan = Gtk.Label(xalign=0)
+        slogan.set_markup(f"<i>{GLib.markup_escape_text(SLOGAN)}</i>")
+        titles.pack_start(title, False, False, 0)
+        titles.pack_start(slogan, False, False, 0)
+        header = Gtk.Box(spacing=12)
+        header.pack_start(logo, False, False, 0)
+        header.pack_start(titles, False, False, 0)
+
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
-        for w in (self.hint, scroll, buttons, self.sound, bottom):
+        for w in (header, scroll, self.hint, buttons, self.sound, bottom):
             box.pack_start(w, w is scroll, True, 0)
         self.add(box)
         self.show_all()

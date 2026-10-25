@@ -1,4 +1,8 @@
-# Shiftly
+<p align="center"><img src="icons/shiftly.svg" alt="Shiftly logo" width="112"></p>
+
+<h1 align="center">Shiftly</h1>
+
+<p align="center"><em>What's the best position to work? The next one.</em></p>
 
 A tiny Linux tray app that cycles through named phases (e.g. *Sitting 40 min → Standing 20 min*) and sends a notification when it's time to change position.
 

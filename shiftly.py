@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shiftly - cycles through named sit/stand phases and reminds you to switch."""
 import json
+import math
 import os
 import subprocess
 import sys
@@ -24,6 +25,16 @@ CONFIG_PATH = os.path.join(
     "shiftly",
     "config.json",
 )
+MAX_PHASES = 50
+MAX_NAME_LEN = 40
+MIN_MINUTES = 0.1
+MAX_MINUTES = 720
+SCREENSAVER_INTERFACES = (
+    "org.cinnamon.ScreenSaver",
+    "org.gnome.ScreenSaver",
+    "org.freedesktop.ScreenSaver",
+)
+HINT = "Phases run top to bottom, then repeat."
 SLOGAN = "What's the best position to work? The next one."
 SOUND_FILE = "/usr/share/sounds/freedesktop/stereo/complete.oga"
 DEFAULT_CONFIG = {
@@ -32,23 +43,74 @@ DEFAULT_CONFIG = {
         {"name": "Standing", "minutes": 20},
     ],
     "sound": True,
+    "pause_on_lock": True,
 }
 
 
+def validate_phase(name, minutes):
+    """Returns a cleaned (name, minutes) pair or raises ValueError with a user-facing message."""
+    name = str(name).strip()
+    if not name:
+        raise ValueError("Phase name can't be empty.")
+    if len(name) > MAX_NAME_LEN:
+        raise ValueError(f"Phase name can be at most {MAX_NAME_LEN} characters.")
+    if not name.isprintable():
+        raise ValueError("Phase name contains unsupported characters.")
+    msg = f"Minutes must be a number between {MIN_MINUTES} and {MAX_MINUTES}."
+    if isinstance(minutes, bool):
+        raise ValueError(msg)
+    try:
+        minutes = float(minutes)
+    except (TypeError, ValueError):
+        raise ValueError(msg) from None
+    if not math.isfinite(minutes) or not MIN_MINUTES <= minutes <= MAX_MINUTES:
+        raise ValueError(msg)
+    return name, minutes
+
+
+def validate_config(phases, sound, pause_on_lock):
+    """Validates a full phase list; raises ValueError with a user-facing message."""
+    if not phases:
+        raise ValueError("At least one phase is required.")
+    if len(phases) > MAX_PHASES:
+        raise ValueError(f"At most {MAX_PHASES} phases are allowed.")
+    cleaned = []
+    seen = set()
+    for name, minutes in phases:
+        name, minutes = validate_phase(name, minutes)
+        if name.casefold() in seen:
+            raise ValueError(f"Phase name '{name}' is used more than once.")
+        seen.add(name.casefold())
+        cleaned.append({"name": name, "minutes": minutes})
+    return {"phases": cleaned, "sound": bool(sound), "pause_on_lock": bool(pause_on_lock)}
+
+
+def default_config():
+    return json.loads(json.dumps(DEFAULT_CONFIG))
+
+
 def load_config():
+    """Reads the config; anything broken or invalid falls back to defaults."""
     try:
         with open(CONFIG_PATH) as f:
             cfg = json.load(f)
-        phases = [
-            {"name": str(p["name"]), "minutes": float(p["minutes"])}
-            for p in cfg["phases"]
-            if float(p["minutes"]) > 0
-        ]
+        phases = []
+        seen = set()
+        for p in cfg["phases"][:MAX_PHASES]:
+            try:
+                name, minutes = validate_phase(p["name"], p["minutes"])
+            except (ValueError, KeyError, TypeError):
+                continue  # drop just the broken phase
+            if name.casefold() not in seen:
+                seen.add(name.casefold())
+                phases.append((name, minutes))
         if phases:
-            return {"phases": phases, "sound": bool(cfg.get("sound", True))}
-    except (OSError, ValueError, KeyError, TypeError):
+            return validate_config(
+                phases, cfg.get("sound", True), cfg.get("pause_on_lock", True)
+            )
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
-    return json.loads(json.dumps(DEFAULT_CONFIG))
+    return default_config()
 
 
 def save_config(cfg):
@@ -74,9 +136,15 @@ class Cycle:
     def __init__(self, cfg):
         self.cfg = cfg
         self.paused = False
+        self.locked = False
         self.index = 0
         self.remaining = 0
         self.start_phase(0)
+
+    @property
+    def halted(self):
+        """True while the clock is stopped, by the user or by a locked screen."""
+        return self.paused or (self.locked and self.cfg["pause_on_lock"])
 
     @property
     def phase(self):
@@ -88,7 +156,7 @@ class Cycle:
 
     def tick(self, elapsed):
         """Advance the clock; returns True when a phase just ended."""
-        if self.paused:
+        if self.halted:
             return False
         self.remaining -= elapsed
         if self.remaining <= 0:
@@ -123,6 +191,7 @@ class Shiftly(Gtk.Application):
         Notify.init("Shiftly")
         self.cycle = Cycle(load_config())
         self.build_tray()
+        self.watch_screen_lock()
         self.refresh()
         GLib.timeout_add_seconds(1, self.on_tick)
         self.hold()
@@ -130,6 +199,33 @@ class Shiftly(Gtk.Application):
     def do_activate(self):
         # launching a second copy opens the settings of the running one
         self.show_settings()
+
+    # -- screen lock -------------------------------------------------------
+
+    def watch_screen_lock(self):
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        except GLib.Error:
+            return
+        for iface in SCREENSAVER_INTERFACES:
+            bus.signal_subscribe(
+                None, iface, "ActiveChanged", None, None,
+                Gio.DBusSignalFlags.NONE, self.on_screensaver_changed,
+            )
+        try:  # the screen may already be locked when we start
+            reply = bus.call_sync(
+                "org.cinnamon.ScreenSaver", "/org/cinnamon/ScreenSaver",
+                "org.cinnamon.ScreenSaver", "GetActive", None,
+                GLib.VariantType("(b)"), Gio.DBusCallFlags.NONE, 1000, None,
+            )
+            self.cycle.locked = reply.unpack()[0]
+        except GLib.Error:
+            pass
+
+    def on_screensaver_changed(self, _bus, _sender, _path, _iface, _signal, params):
+        self.cycle.locked = bool(params.unpack()[0])
+        self.last_tick = time.monotonic()  # don't count the locked time
+        self.refresh()
 
     # -- tray --------------------------------------------------------------
 
@@ -202,7 +298,7 @@ class Shiftly(Gtk.Application):
 
     def announce(self):
         p = self.cycle.phase
-        body = f"{p['name']} for {fmt_minutes(p['minutes'])} min"
+        body = GLib.markup_escape_text(f"{p['name']} for {fmt_minutes(p['minutes'])} min")
         n = Notify.Notification.new("Time to change position", body, "dialog-information")
         n.set_urgency(Notify.Urgency.CRITICAL)
         try:
@@ -210,21 +306,24 @@ class Shiftly(Gtk.Application):
         except GLib.Error:
             pass
         if self.cycle.cfg["sound"] and os.path.exists(SOUND_FILE):
-            subprocess.Popen(
-                ["paplay", SOUND_FILE],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            try:
+                subprocess.Popen(
+                    ["paplay", SOUND_FILE],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass  # no paplay; the notification is enough
 
     def refresh(self):
         c = self.cycle
-        state = " (paused)" if c.paused else ""
+        state = " (paused)" if c.paused else " (locked)" if c.halted else ""
         text = f"{c.phase['name']} {fmt_clock(c.remaining)}{state}"
         self.status_item.set_label(text)
         self.pause_item.set_label("Resume" if c.paused else "Pause")
         icon_name = (
             "media-playback-pause-symbolic"
-            if c.paused
+            if c.halted
             else "shiftly-symbolic"
         )
         if XApp is not None:
@@ -290,6 +389,8 @@ class SettingsWindow(Gtk.Window):
 
         self.sound = Gtk.CheckButton(label="Play a sound on phase change")
         self.sound.set_active(app.cycle.cfg["sound"])
+        self.lock_pause = Gtk.CheckButton(label="Pause the timer while the screen is locked")
+        self.lock_pause.set_active(app.cycle.cfg["pause_on_lock"])
 
         save = Gtk.Button(label="Save")
         save.get_style_context().add_class("suggested-action")
@@ -300,9 +401,7 @@ class SettingsWindow(Gtk.Window):
         bottom.pack_end(save, False, False, 0)
         bottom.pack_end(close, False, False, 0)
 
-        self.hint = Gtk.Label(
-            label="Phases run top to bottom, then repeat.", xalign=0
-        )
+        self.hint = Gtk.Label(label=HINT, xalign=0, wrap=True)
         self.hint.get_style_context().add_class("dim-label")
         logo = Gtk.Image.new_from_icon_name("shiftly", Gtk.IconSize.DIALOG)
         logo.set_pixel_size(56)
@@ -318,24 +417,27 @@ class SettingsWindow(Gtk.Window):
         header.pack_start(titles, False, False, 0)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
-        for w in (header, scroll, self.hint, buttons, self.sound, bottom):
+        for w in (header, scroll, self.hint, buttons, self.sound, self.lock_pause, bottom):
             box.pack_start(w, w is scroll, True, 0)
         self.add(box)
         self.show_all()
 
     def on_edited(self, _renderer, path, text, col):
-        text = text.strip()
-        if col == 1:
-            try:
-                if float(text) <= 0:
-                    raise ValueError
-            except ValueError:
-                return
-        elif not text:
+        row = self.store[path]
+        values = [row[0], row[1]]
+        values[col] = text
+        try:
+            name, minutes = validate_phase(*values)
+        except ValueError as e:
+            self.hint.set_text(str(e))
             return
-        self.store[path][col] = text
+        self.hint.set_text(HINT)
+        row[0], row[1] = name, fmt_minutes(minutes)
 
     def on_add(self, *_):
+        if len(self.store) >= MAX_PHASES:
+            self.hint.set_text(f"At most {MAX_PHASES} phases are allowed.")
+            return
         it = self.store.append(["New phase", "30"])
         path = self.store.get_path(it)
         self.view.set_cursor(path, self.view.get_column(0), True)
@@ -358,10 +460,16 @@ class SettingsWindow(Gtk.Window):
             model.swap(it, other)
 
     def on_save(self, *_):
-        phases = [
-            {"name": row[0], "minutes": float(row[1])} for row in self.store
-        ]
-        self.app.apply_settings({"phases": phases, "sound": self.sound.get_active()})
+        try:
+            cfg = validate_config(
+                [(row[0], row[1]) for row in self.store],
+                self.sound.get_active(),
+                self.lock_pause.get_active(),
+            )
+        except ValueError as e:
+            self.hint.set_text(str(e))
+            return
+        self.app.apply_settings(cfg)
         self.hint.set_text("Saved.")
 
 

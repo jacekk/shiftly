@@ -9,6 +9,7 @@ A tiny Linux tray app that cycles through named phases (e.g. *Sitting 40 min →
 - Per-phase names and durations, all editable in a settings window
 - Tray icon shows the current phase and time left
 - Pause / resume, skip to next phase, or start any phase directly
+- Optionally pauses while the screen is locked (Cinnamon, GNOME and freedesktop screensavers)
 - Starts on login
 
 Built for Linux Mint (Cinnamon); falls back to a plain GTK status icon elsewhere.
@@ -23,3 +24,7 @@ shiftly &
 ```
 
 Config lives in `~/.config/shiftly/config.json`. Running `shiftly` again opens the settings of the running instance.
+
+## License
+
+MIT, see `LICENSE`.

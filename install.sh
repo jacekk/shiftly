@@ -27,8 +27,8 @@ Terminal=false
 Categories=Utility;
 X-GNOME-Autostart-enabled=true"
 
-echo "$desktop" > "$autostart_dir/shiftly.desktop"
 echo "$desktop" > "$apps_dir/shiftly.desktop"
+echo "$desktop" | sed "s|^Exec=.*|Exec=$bin_dir/shiftly --background|" > "$autostart_dir/shiftly.desktop"
 
 echo "Installed to $bin_dir/shiftly; it will start on next login."
 echo "Start it now with: shiftly &"

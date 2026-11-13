@@ -183,6 +183,15 @@ class Shiftly(Gtk.Application):
         self.indicator = None
         self.last_tick = time.monotonic()
         self.settings_win = None
+        self.background = False
+        self.add_main_option(
+            "background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+            "Start in the tray without opening the settings window", None,
+        )
+
+    def do_handle_local_options(self, options):
+        self.background = options.contains("background")
+        return -1
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -198,6 +207,10 @@ class Shiftly(Gtk.Application):
 
     def do_activate(self):
         # launching a second copy opens the settings of the running one
+        if self.background:
+            # --background: skip the window on the first activation only
+            self.background = False
+            return
         self.show_settings()
 
     # -- screen lock -------------------------------------------------------
